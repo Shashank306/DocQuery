@@ -136,14 +136,14 @@ DocQuery is a full-stack application allowing users to upload documents and inte
 
 
 ## 🔑 ENV Sample
-
+```
 # .env
 SECRET_KEY=your_jwt_secret_key
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 DATABASE_URL=sqlite:///./rag_db.db
 WEAVIATE_HOST=http://localhost:8080
 GROQ_API_KEY=your_key
-
+```
 
 🚀 Running Locally
 1. Clone repo
