@@ -149,13 +149,14 @@ GROQ_API_KEY=your_key
 1. Clone repo
 2. Start Weaviate (Docker)
 3. Run backend:
-
+```
 cd backend
 uvicorn app.main:app --reload
-
+```
 4.Run frontend:
-
+```
 cd frontend
 npm install
 npm run dev
 
+```
