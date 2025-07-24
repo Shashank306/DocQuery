@@ -17,10 +17,11 @@ import uuid
 import zipfile
 import tempfile
 import shutil
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request, status, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Request, status, BackgroundTasks,Form
 from sqlmodel import Session
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -474,192 +475,174 @@ async def list_user_documents(
         )
 
 
-@router.post("/batch/folder", response_model=FolderUploadResponse)
+# @router.post("/batch/folder", response_model=FolderUploadResponse)
+@router.post("/batch/upload", response_model=BulkUploadResponse)
 @limiter.limit(settings.RATE_LIMIT_UPLOAD)
-async def upload_folder_documents(
+async def upload_files(
     request: Request,
     background_tasks: BackgroundTasks,
-    folder_request: FolderUploadRequest,
+    files: List[UploadFile] = File(...),
+    session_id: str = Form(...),
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     """
-    Process documents from a specified folder path using Enhanced DirectoryLoader.
-    
-    This endpoint allows processing documents directly from a server-side folder path:
-    - Supports all file types: PDF, TXT, CSV, JSON (DOCX when available)
-    - Processes files recursively from subdirectories (default behavior)
-    - Validates folder path and file accessibility
-    - Uses the same DirectoryLoader optimizations as file upload
-    - Maximum 100 files per folder
-    - Security: Only processes files in allowed directories (configurable)
-    
-    **Security Note**: This endpoint processes files from server-side paths.
-    Ensure proper access controls are in place.
+    Upload multiple documents (PDF, TXT, CSV, JSON, etc.) in one request.
+    Accepts multipart/form-data with one or more files and enqueues each for ingestion, scoped to a session.
     """
-    folder_path = Path(folder_request.folder_path)
-    
-    # Security validation - ensure folder path is safe
-    if not _validate_folder_path(folder_path):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access to the specified folder path is not allowed"
-        )
-    
-    # Check if folder exists and is accessible
-    if not folder_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Folder path does not exist: {folder_path}"
-        )
-    
-    if not folder_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Path is not a directory: {folder_path}"
-        )
-    
     try:
-        logger.info(f"Processing folder: {folder_path} for user {current_user.id}")
-        
-        # Use all supported file types (simplified - no filtering)
-        supported_extensions = {'.pdf', '.txt', '.csv', '.json', '.docx'}
-        
-        # Count total files before processing (recursive by default)
-        total_files_found = 0
-        for ext in supported_extensions:
-            pattern = f"**/*{ext}"  # Always recursive
-            total_files_found += len(list(folder_path.glob(pattern)))
-        
-        if total_files_found == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"No supported files found in folder. Supported types: {', '.join(supported_extensions)}"
+        response_items: List[BulkUploadResponseItem] = []
+
+        for file in files:
+            # Validate file size and type
+            validate_file(file)
+
+            # Save to user-specific directory
+            saved_path = save_upload_file(file, current_user.id)
+
+            # Create database record (associate with session)
+            document_id = uuid.uuid4().hex
+            user_doc = UserDocument(
+                user_id=current_user.id,
+                session_id=session_id,
+                document_id=document_id,
+                filename=saved_path.name,
+                original_filename=file.filename,
+                file_path=str(saved_path),
+                file_size=saved_path.stat().st_size,
+                content_type=file.content_type or "application/octet-stream",
+                status=IngestionStatus.PROCESSING
             )
-        
-        if total_files_found > 100:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Too many files found ({total_files_found}). Maximum 100 files allowed per folder."
+            session.add(user_doc)
+            session.commit()
+            session.refresh(user_doc)
+
+            # Enqueue ingestion pipeline
+            _, task = ingest_file_for_user(
+                user_id=str(current_user.id),
+                path=saved_path,
+                filename=file.filename,
+                document_id=document_id,
+                session_id=session_id
             )
-        
-        # Process files using DirectoryLoader
-        response_items = await _process_folder_with_directoryloader(
-            folder_path, folder_request, current_user, session, background_tasks
-        )
-        
-        # Calculate results
-        successful_count = len([item for item in response_items if item.status == IngestionStatus.PROCESSING])
-        failed_count = len([item for item in response_items if item.status == "failed"])
-        
-        logger.info(f"Folder processing completed: {successful_count} successful, {failed_count} failed")
-        
-        return FolderUploadResponse(
-            folder_path=str(folder_path),
-            total_files_found=total_files_found,
-            total_files_processed=len(response_items),
+            background_tasks.add_task(task)
+
+            response_items.append(
+                BulkUploadResponseItem(
+                    id=user_doc.id,
+                    filename=file.filename,
+                    status=user_doc.status,
+                    file_size=user_doc.file_size
+                )
+            )
+
+        # Compute summary
+        total_uploaded = len(response_items)
+        successful_count = sum(1 for i in response_items if i.status == IngestionStatus.PROCESSING)
+        failed_count = total_uploaded - successful_count
+
+        # Return matching the BulkUploadResponse schema
+        return BulkUploadResponse(
             documents=response_items,
+            total_uploaded=total_uploaded,
             successful_count=successful_count,
-            failed_count=failed_count,
-            skipped_count=total_files_found - len(response_items),
-            processing_errors=[]
+            failed_count=failed_count
         )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Folder processing error for user {current_user.id}: {e}")
+
+    except Exception:
+        # Log full traceback for debugging
+        logger.error("upload_files failed: %s", traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Folder processing failed: {str(e)}"
+            detail="An error occurred while processing uploads"
         )
 
 
-def _validate_folder_path(folder_path: Path) -> bool:
-    """
-    Validate that the folder path is safe and allowed.
+# def _validate_folder_path(folder_path: Path) -> bool:
+#     """
+#     Validate that the folder path is safe and allowed.
     
-    This function implements security controls to prevent access to unauthorized directories.
-    Updated to allow common user directories like Downloads, Documents, Desktop.
-    """
-    try:
-        # Convert to absolute path for consistent checking
-        abs_path = folder_path.resolve()
-        logger.info(f"Validating folder path: {abs_path}")
+#     This function implements security controls to prevent access to unauthorized directories.
+#     Updated to allow common user directories like Downloads, Documents, Desktop.
+#     """
+#     try:
+#         # Convert to absolute path for consistent checking
+#         abs_path = folder_path.resolve()
+#         logger.info(f"Validating folder path: {abs_path}")
         
-        # 1. Check if path is under allowed base directories
-        allowed_base_dirs = [
-            Path(settings.DATA_DIR),  # Your data directory
-            Path.cwd() / "data",      # Project data directory
-            # Common user directories using Path.home()
-            Path.home() / "Downloads",     # User Downloads folder
-            Path.home() / "Documents",     # User Documents folder  
-            Path.home() / "Desktop",       # User Desktop folder
-            # Explicit Windows paths for admin user
-            Path("C:/Users/admin/Downloads"),  # Admin Downloads
-            Path("C:/Users/admin/Documents"),  # Admin Documents
-            Path("C:/Users/admin/Desktop"),    # Admin Desktop
-            # Alternative Windows path format
-            Path("C:\\Users\\admin\\Downloads"),  # Admin Downloads (backslash)
-            Path("C:\\Users\\admin\\Documents"),  # Admin Documents (backslash)
-            Path("C:\\Users\\admin\\Desktop"),    # Admin Desktop (backslash)
-            # Add other allowed directories as needed
-            # Path("/allowed/path/1"),
-            # Path("/allowed/path/2"),
-        ]
+#         # 1. Check if path is under allowed base directories
+#         allowed_base_dirs = [
+#             Path(settings.DATA_DIR),  # Your data directory
+#             Path.cwd() / "data",      # Project data directory
+#             # Common user directories using Path.home()
+#             Path.home() / "Downloads",     # User Downloads folder
+#             Path.home() / "Documents",     # User Documents folder  
+#             Path.home() / "Desktop",       # User Desktop folder
+#             # Explicit Windows paths for admin user
+#             Path("C:/Users/admin/Downloads"),  # Admin Downloads
+#             Path("C:/Users/admin/Documents"),  # Admin Documents
+#             Path("C:/Users/admin/Desktop"),    # Admin Desktop
+#             # Alternative Windows path format
+#             Path("C:\\Users\\admin\\Downloads"),  # Admin Downloads (backslash)
+#             Path("C:\\Users\\admin\\Documents"),  # Admin Documents (backslash)
+#             Path("C:\\Users\\admin\\Desktop"),    # Admin Desktop (backslash)
+#             # Add other allowed directories as needed
+#             # Path("/allowed/path/1"),
+#             # Path("/allowed/path/2"),
+#         ]
         
-        logger.info(f"Checking against {len(allowed_base_dirs)} allowed directories")
+#         logger.info(f"Checking against {len(allowed_base_dirs)} allowed directories")
         
-        # Check if the path is under any allowed base directory
-        for i, allowed_dir in enumerate(allowed_base_dirs):
-            try:
-                abs_allowed = allowed_dir.resolve()
-                logger.debug(f"Checking against allowed dir {i}: {abs_allowed}")
+#         # Check if the path is under any allowed base directory
+#         for i, allowed_dir in enumerate(allowed_base_dirs):
+#             try:
+#                 abs_allowed = allowed_dir.resolve()
+#                 logger.debug(f"Checking against allowed dir {i}: {abs_allowed}")
                 
-                # Check if the folder path is under this allowed directory
-                relative_path = abs_path.relative_to(abs_allowed)
-                logger.info(f"✅ Folder path {abs_path} is allowed under {abs_allowed} (relative: {relative_path})")
-                return True  # Path is under an allowed directory
+#                 # Check if the folder path is under this allowed directory
+#                 relative_path = abs_path.relative_to(abs_allowed)
+#                 logger.info(f"✅ Folder path {abs_path} is allowed under {abs_allowed} (relative: {relative_path})")
+#                 return True  # Path is under an allowed directory
                 
-            except ValueError:
-                # Path is not under this allowed directory, continue checking
-                logger.debug(f"Path {abs_path} not under {abs_allowed}")
-                continue
-            except Exception as e:
-                logger.warning(f"Error checking path {abs_path} against {abs_allowed}: {e}")
-                continue
+#             except ValueError:
+#                 # Path is not under this allowed directory, continue checking
+#                 logger.debug(f"Path {abs_path} not under {abs_allowed}")
+#                 continue
+#             except Exception as e:
+#                 logger.warning(f"Error checking path {abs_path} against {abs_allowed}: {e}")
+#                 continue
         
-        # 2. Deny access to system directories (additional security)
-        forbidden_patterns = [
-            "/etc/", "/var/", "/usr/", "/sys/", "/proc/",  # Linux system dirs
-            "C:\\Windows\\", "C:\\Program Files\\",        # Windows system dirs
-            "C:\\Program Files (x86)\\",                   # Windows x86 programs
-            "/..", "../",                                  # Path traversal attempts
-            "C:/Windows/", "C:/Program Files/",            # Forward slash variants
-            "C:/Program Files (x86)/",
-        ]
+#         # 2. Deny access to system directories (additional security)
+#         forbidden_patterns = [
+#             "/etc/", "/var/", "/usr/", "/sys/", "/proc/",  # Linux system dirs
+#             "C:\\Windows\\", "C:\\Program Files\\",        # Windows system dirs
+#             "C:\\Program Files (x86)\\",                   # Windows x86 programs
+#             "/..", "../",                                  # Path traversal attempts
+#             "C:/Windows/", "C:/Program Files/",            # Forward slash variants
+#             "C:/Program Files (x86)/",
+#         ]
         
-        str_path = str(abs_path).replace("\\", "/")  # Normalize for pattern matching
-        for pattern in forbidden_patterns:
-            if pattern.lower() in str_path.lower():
-                logger.warning(f"Forbidden path pattern detected: {pattern} in {abs_path}")
-                return False
+#         str_path = str(abs_path).replace("\\", "/")  # Normalize for pattern matching
+#         for pattern in forbidden_patterns:
+#             if pattern.lower() in str_path.lower():
+#                 logger.warning(f"Forbidden path pattern detected: {pattern} in {abs_path}")
+#                 return False
         
-        # If we reach here, path is not under any allowed directory
-        logger.warning(f"❌ Path not under allowed directories: {abs_path}")
-        logger.info(f"Allowed directories are:")
-        for i, allowed_dir in enumerate(allowed_base_dirs):
-            try:
-                resolved = allowed_dir.resolve()
-                logger.info(f"  {i+1}. {resolved}")
-            except Exception as e:
-                logger.info(f"  {i+1}. {allowed_dir} (error resolving: {e})")
+#         # If we reach here, path is not under any allowed directory
+#         logger.warning(f"❌ Path not under allowed directories: {abs_path}")
+#         logger.info(f"Allowed directories are:")
+#         for i, allowed_dir in enumerate(allowed_base_dirs):
+#             try:
+#                 resolved = allowed_dir.resolve()
+#                 logger.info(f"  {i+1}. {resolved}")
+#             except Exception as e:
+#                 logger.info(f"  {i+1}. {allowed_dir} (error resolving: {e})")
         
-        return False
+#         return False
         
-    except Exception as e:
-        logger.error(f"Error validating folder path {folder_path}: {e}")
-        return False
+#     except Exception as e:
+#         logger.error(f"Error validating folder path {folder_path}: {e}")
+#         return False
 
 
 async def _process_folder_with_directoryloader(

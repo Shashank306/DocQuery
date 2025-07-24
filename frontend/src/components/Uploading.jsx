@@ -6,7 +6,7 @@ export default function Uploading() {
                 <h2 className="text-2xl font-bold mb-4">Uploading Documents</h2>
                 <p className="text-gray-600 mb-4">Please    wait while your documents are being uploaded...</p>
                 <div className="flex items-center justify-center">
-                    <svg className="animate-spin h-10 w-10 text-blue-500"
+                    <svg className="animate-spin h-10 w-10 text-indigo-500"
                          xmlns="http://www.w3.org/2000/svg"
                          fill="none"
                          viewBox="0 0 24 24">

@@ -1,6 +1,7 @@
 // src/components/Sidebar.jsx
 import { useEffect, useState } from "react";
 import { MdDelete } from "react-icons/md";
+import { FiMessageCircle } from "react-icons/fi";
 
 function Sidebar({ sessions = [], onNewSession, onSessionClick, onDeleteSession, activeSessionId }) {
   const [error, setError] = useState(null);
@@ -32,20 +33,26 @@ function Sidebar({ sessions = [], onNewSession, onSessionClick, onDeleteSession,
 
   const renderSession = (session) => (
     <div
-      className={`flex justify-between items-center p-2 rounded shadow transition cursor-pointer ${
-        activeSessionId === session.session_id ? "bg-blue-500 font-semibold text-white" : "bg-white hover:bg-blue-50"
+      className={`flex justify-between items-center p-3 rounded-xl shadow-md transition cursor-pointer ${
+        activeSessionId === session.session_id
+          ? "bg-indigo-500 text-white font-semibold"
+          : "bg-white hover:bg-indigo-500 text-gray-800"
       }`}
     >
       <div
-        className="text-sm cursor-pointer flex w-full flex-col"
+        className="text-sm flex w-full flex-col"
         onClick={() => onSessionClick(session.session_id)}
       >
-        {new Date(session.created_at).toISOString().split("T")[0] === today
-          ? "Today"
-          : new Date(session.created_at).toLocaleDateString()}
+        <span>
+          {session.name
+            ? session.name
+            : new Date(session.created_at).toISOString().split("T")[0] === today
+              ? "Today"
+              : new Date(session.created_at).toLocaleDateString()}
+        </span>
         <div
           className={`text-xs text-end ${
-            activeSessionId === session.session_id ? "text-gray-100" : "text-gray-600"
+            activeSessionId === session.session_id ? "text-indigo-100" : "text-gray-500"
           }`}
         >
           {new Date(session.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -53,10 +60,17 @@ function Sidebar({ sessions = [], onNewSession, onSessionClick, onDeleteSession,
       </div>
       <button
         onClick={() => onDeleteSession(session.session_id)}
-        className="text-red-500 text-xs ml-2 hover:underline"
+        className="ml-2"
         title="Delete chat"
       >
-        <MdDelete size={20} className="text-black hover:text-red-700" />
+        <MdDelete
+          size={22}
+          className={`transition ${
+            activeSessionId === session.session_id
+              ? "text-white hover:text-red-200"
+              : " hover:text-red-800"
+          }`}
+        />
       </button>
     </div>
   );
@@ -66,12 +80,12 @@ function Sidebar({ sessions = [], onNewSession, onSessionClick, onDeleteSession,
   }
 
   return (
-    <div className="w-64 bg-gray-100 border-r h-screen flex flex-col">
+    <div className="w-64 bg-white shadow-lg rounded-r-2xl h-screen flex flex-col">
       {/* Header */}
-      <div className="sticky top-0 bg-gray-100 z-10 p-4 border-b">
-        <h2 className="text-blue-800 text-2xl font-bold mb-2 px-2">DocQuery</h2>
+      <div className="sticky top-0 bg-white z-10 p-4 border-b rounded-tr-2xl">
+        <h2 className="text-indigo-700 text-2xl font-bold mb-3 text-center">DocQuery</h2>
         <button
-          className="w-full bg-blue-500 text-white cursor-pointer py-2 rounded hover:bg-white hover:text-blue-500 hover:border hover:border-blue-500 transition duration-200"
+          className="w-full bg-indigo-600 text-white py-2 rounded-xl hover:bg-indigo-700 transition"
           onClick={onNewSession}
         >
           + New Chat
@@ -79,19 +93,29 @@ function Sidebar({ sessions = [], onNewSession, onSessionClick, onDeleteSession,
       </div>
 
       {/* Sessions */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
-        {todaySessions.length > 0 && <h3 className="text-lg font-semibold mb-2">Today's Sessions</h3>}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {todaySessions.length > 0 && (
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Today's Sessions</h3>
+        )}
         {todaySessions.map((session) => (
           <div key={session.session_id}>{renderSession(session)}</div>
         ))}
 
         {todaySessions.length === 0 && pastSessions.length === 0 && (
-          <p className="text-gray-500 text-sm">No Chat. Create New Chat</p>
+          <div className="flex flex-col items-center justify-center text-gray-400 text-sm mt-6">
+            <FiMessageCircle size={24} className="mb-2" />
+            <p>No Chat. Create New Chat</p>
+          </div>
         )}
 
-        {pastSessions.length > 0 && pastSessions.map((session) => (
-          <div key={session.session_id}>{renderSession(session)}</div>
-        ))}
+        {pastSessions.length > 0 && (
+          <>
+            <h3 className="text-sm font-semibold text-gray-700 mt-4 mb-2">Past Sessions</h3>
+            {pastSessions.map((session) => (
+              <div key={session.session_id}>{renderSession(session)}</div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   );

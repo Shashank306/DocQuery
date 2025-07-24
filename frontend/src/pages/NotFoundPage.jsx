@@ -1,7 +1,7 @@
 function NotFoundPage() {
     return (
         <>
-            <p>Page Not Found (Route galat hai)</p>
+            <p>Page Not Found</p>
         </>
     );
 }

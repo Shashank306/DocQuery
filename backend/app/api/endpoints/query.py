@@ -48,7 +48,7 @@ async def query_search(
         search_results = hybrid_search_user_with_metadata(
             user_id=str(current_user.id),
             query=query_request.query,
-            top_k=query_request.limit
+            top_k=query_request.limit,
         )
 
         
@@ -132,6 +132,15 @@ async def query_search(
         )
         
         session.add(user_query)
+        # Auto-set session name if it's the first message and name is missing
+        if query_request.session_id:
+            from app.models.db import UserSession
+            user_session = session.exec(
+                select(UserSession).where(UserSession.session_id == query_request.session_id)
+            ).first()
+            if user_session and not user_session.name:
+                user_session.name = query_request.query.strip()[:50]
+
         session.commit()
         
         logger.info(f"Query completed for user {current_user.username} in {response_time_ms}ms")
