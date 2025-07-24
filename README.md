@@ -112,7 +112,7 @@ DocQuery is a full-stack application allowing users to upload documents and inte
 --- -->
 
 ## 📦 Folder Structure
-
+```
 ├── backend/
 │ ├── app/
 │ │ ├── auth/ # JWT logic, hashing, Pydantic models
@@ -132,13 +132,11 @@ DocQuery is a full-stack application allowing users to upload documents and inte
 │ │ └── main.jsx # Root entry
 │ └── index.html
 └── README.md
+```
 
-
----
 
 ## 🔑 ENV Sample
 
-```env
 # .env
 SECRET_KEY=your_jwt_secret_key
 ACCESS_TOKEN_EXPIRE_MINUTES=60
@@ -160,3 +158,4 @@ uvicorn app.main:app --reload
 cd frontend
 npm install
 npm run dev
+
